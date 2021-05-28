@@ -1,0 +1,257 @@
+#lang racket #| CSC324 Fall 2020: Project 2 |#
+
+(require "mk.rkt")
+; (require racket/pretty) ; you might find the prettyprint function useful
+
+(provide typeof typeo)
+
+;-------------------------------------------------------------------------------
+; * Task 1: A Simple Type Inferencer *
+;-------------------------------------------------------------------------------
+
+#|
+(typeof expr typeenv)
+  expr: An expression following the spreadsheet grammar
+  typeenv: An association list containing the mapping of identifiers to type
+
+  Returns the type of the expression expr: 'num, 'str, 'bool, 'error
+|#
+(define (typeof expr typeenv)
+  (cond
+    ; Constants
+    [(number? expr) 'num]
+    [(boolean? expr) 'bool]
+    [(string? expr) 'str]
+    ; Identifiers
+    [(symbol? expr) (lookup expr typeenv)]
+    ; Builtins    
+    ; '((num num) num/bool) / '((str str) str) 从 equal type那里改 收到的东西，然后return一个type
+    [(and (list? expr)
+          (equal? 3 (length expr))
+          (set-member? (set '+ '- '* '/ '> '>= '=  '++ ) (first expr)))
+     (let ([symbol (first expr)]
+           [first-value (typeof (second expr) typeenv)]
+           [second-value (typeof (third expr) typeenv)])
+       (cond
+         [(and (set-member? (set '+ '- '* '/) symbol) (equal? 'num first-value) (equal? 'num second-value)) 'num]
+         [(and (set-member? (set '> '>= '=) symbol) (equal? 'num first-value) (equal? 'num second-value)) 'bool]
+         [(and (equal? '++ symbol) (equal? 'str first-value) (equal? 'str second-value)) 'str]
+         [else 'error]))]
+    ;'((bool) bool) / '((num) str) / '((str) num)
+    [(and (list? expr)
+          (equal? 2 (length expr))
+          (set-member? (set '! 'num->string 'len) (first expr)))
+     (let ([symbol (first expr)]
+           [first-value (second expr)])
+       (cond
+         [(and (equal? symbol '!) (equal? 'bool first-value)) 'bool]
+         [(and (equal? symbol 'num->string) (equal? 'num first-value)) 'str]
+         [(and (equal? symbol 'len) (equal? 'str first-value)) 'num]
+         [else 'error]))]
+    ; Function Calls   分为两种1.无input return env里的东西
+    ;2.检测input 和 要return的东西，如果通过后给second value
+    [(list? expr)
+     (let
+         (
+          ;[actual-input (typeof (second expr) typeenv)]
+          [actual-input (rest expr)];lst contain the rest argument              
+          [expect-input (first (lookup (first expr) typeenv))] ;list contains all expected num
+          [expect-output (second (lookup (first expr) typeenv))])
+           
+       (if
+        (equal? (map (lambda (x) (typeof x typeenv)) actual-input) expect-input)
+        expect-output
+        'error))]
+    [else 'errortest3] 
+    ))
+
+; Helper functions for Task 1
+
+#|
+(lookup key alst)
+  elem: A key in the association list
+  alst: An association list 
+
+  Returns the value corresponding to the first time the key appears in the
+  association list, or #f if the key does not exist.
+
+  Examples:
+  > (lookup 'b '((a . 3) (b . 4)))
+  4
+  > (lookup 'b '((a . 3) (b . 4) (b . 5)))
+  4
+  > (lookup 'c '((a . 3) (b . 4) (b . 5)))
+  #f
+|#
+(define (lookup key alst)
+  (cond
+    [(empty? alst) #f]
+    [(equal? key (car  (first alst)))
+     (cdr (first alst))]
+    [else (lookup key (rest alst))]))
+
+; Add your helper functions here
+
+;-------------------------------------------------------------------------------
+; * Task 2: A Type Inferencer Relation in miniKanren
+;-------------------------------------------------------------------------------
+
+#|
+(typeo expr typeenv type)
+  expr: An expression following the spreadsheet grammar
+  typeenv: An association list containing the mapping of identifiers to types
+  type: The type of the expression
+
+  The relational form of the `typeof` function
+|#
+(define (typeo expr env type)
+  (conde
+   ; constants: numbero, stringo, and boolo are miniKanren builtin relations
+   ((numbero expr) (== type 'num))
+   ((stringo expr) (== type 'string))
+   ((boolo expr) (== type 'bool))
+   ; identifier: symbolo is a miniKanren builtin relation
+   ((symbolo expr) (lookupo expr env type))
+   ; builtins
+   ((fresh (symbol fir sec fir^ sec^)
+           (== (list symbol fir sec) expr)
+           (typeo fir env fir^)
+           (typeo sec env sec^)
+           (conde
+            ((membero symbol (list '+ '- '* '/))
+             (== fir^ 'num)
+             (== sec^ 'num)
+             (== type 'num))
+            ((membero symbol (list '> '>= '=))
+             (== fir^ 'num)
+             (== sec^ 'num)
+             (== type 'bool))
+            ((== symbol '++)
+             (== fir^ 'string)
+             (== sec^ 'string)
+             (== type 'string)))))
+   ((fresh (symbol fir fir^)
+           (== (list symbol fir) expr)
+           (typeo fir env fir^)
+           (conde
+            ((== symbol '!)
+             (== fir^ 'bool)
+             (== type 'bool))
+            ((== symbol 'num->str)
+             (== fir^ 'num)
+             (== type 'string))
+            ((== symbol 'len)
+             (== fir^ 'string)
+             (== type 'num)))))
+   ; function calls
+   ; 在env里面把function找出来， 看argument满不满足function要求的type
+   ((fresh (fun arg arg-type fun-type arg^)
+           (== expr (cons fun arg))
+           (lookupo fun env fun-type)
+           (type-listo arg env arg-type)
+           (== fun-type (list arg^ type))
+           (== arg^ arg-type)))
+   ; function definitions
+   ((fresh (fir rest lam id exp new-env arg-type type^ id-type)
+           (== expr (cons fir rest))
+           (conde
+            ; 后面有argument的lambda，把里面的variable和argument加到env里面后
+            ; 直接看expr
+            ((=/= fir 'lambda)
+             (== (list lam id exp) fir)
+             (type-listo rest env arg-type)
+             (create-env id arg-type env new-env)
+             (typeo exp new-env type))
+            ((== fir 'lambda)
+             (== (list id exp) rest)
+             (create-env id '() env new-env)
+             (lookup-helper id new-env id-type)
+             (== type (list id-type type^)) 
+             (typeo exp new-env type^)))))
+   ))
+
+
+; Helper functions for Task 2
+
+#|
+(lookupo key alst value)
+  elem: A key in the association list
+  alst: An association list 
+  value: The corresponding value in the association list
+
+  The relational form of the `lookup` function
+|#
+(define (lookupo key alst value)
+  (fresh (fkey fval rest)
+         (== (cons (cons fkey fval) rest) alst)
+         (conde ((== key fkey)
+                 (== value fval))
+                ((=/= key fkey)
+                 (lookupo key rest value)))))
+
+
+; Add your helper functions here
+(define (boolo obj)
+  (conde ((== obj #t))
+         ((== obj #f))))
+
+(define (membero elem lst)
+  (fresh (first rest)
+         (== lst (cons first rest))
+         (conde
+          ((== first elem))
+          ((membero elem rest)))))
+
+(define (type-listo expr env list)
+  (conde ((== expr '())
+          (== list '()))
+         ((fresh (first rest type lst)
+                 (== expr (cons first rest))
+                 (typeo first env type)
+                 (== list (cons type lst))
+                 (type-listo rest env lst)))))
+
+#;(define (create-envo id arg env new)
+    (conde ((== id '())
+            (== arg '())
+            (== new env))
+           ((fresh (id-fir id-rest arg-fir arg-rest temp new^)
+                   (== id (cons id-fir id-rest))
+                   (== arg (cons arg-fir arg-rest))
+                   (== temp (cons id-fir arg-fir))
+                   (== new (cons temp new^))
+                   (create-envo id-rest arg-rest env new^)))))
+
+#;(define (create-logic-envo id env new)
+    (conde ((== id '())
+            (== new env))
+           ((fresh (id-fir id-rest temp new^ logic)
+                   (== id (cons id-fir id-rest))
+                   (== temp (cons id-fir logic))
+                   (== new (cons temp new^))
+                   (create-logic-envo id-rest env new^)))))
+
+(define (create-env id arg env new)
+  (conde ((== id '())
+          (== new env))
+         ((fresh (id-fir id-rest arg-fir arg-rest temp new^ logic)
+                 (== id (cons id-fir id-rest))
+                 (conde ((=/= arg '())
+                         (== arg (cons arg-fir arg-rest))
+                         (== temp (cons id-fir arg-fir))
+                         (== new (cons temp new^)))
+                        ((== arg '())
+                         (== temp (cons id-fir logic))
+                         (== arg-rest '())
+                         (== new (cons temp new^))))
+                 (== new (cons temp new^))
+                 (create-env id-rest arg-rest env new^)))))
+
+(define (lookup-helper id env list)
+  (conde ((== id '())
+          (== list '()))
+         ((fresh (id-fir id-rest type list^)
+                 (== id (cons id-fir id-rest))
+                 (lookupo id-fir env type)
+                 (== list (cons type list^))
+                 (lookup-helper id-rest env list^)))))
